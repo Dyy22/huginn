@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"html"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -76,6 +77,9 @@ func (c *Client) Fetch(ctx context.Context, categories []string, keyword string,
 		}
 	}
 
+	start := time.Now()
+	log.Printf("[NEWS] Fetching %d RSS feed(s) (categories=%v, keyword=%q)...", len(selected), categories, keyword)
+
 	var (
 		mu       sync.Mutex
 		wg       sync.WaitGroup
@@ -88,6 +92,7 @@ func (c *Client) Fetch(ctx context.Context, categories []string, keyword string,
 			defer wg.Done()
 			items, err := c.fetchSingleFeed(ctx, fs)
 			if err != nil {
+				log.Printf("[NEWS] Feed %q (%s) error: %v", fs.Name, fs.Category, err)
 				return
 			}
 			mu.Lock()
@@ -96,6 +101,7 @@ func (c *Client) Fetch(ctx context.Context, categories []string, keyword string,
 		}(src)
 	}
 	wg.Wait()
+	log.Printf("[NEWS] Fetched %d raw article(s) across %d feed(s) in %s", len(articles), len(selected), time.Since(start).Round(time.Millisecond))
 
 	kw := strings.ToLower(strings.TrimSpace(keyword))
 	var filtered []Article

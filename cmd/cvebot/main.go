@@ -42,13 +42,13 @@ func main() {
 		return
 	}
 
-	st, err := store.Open(cfg.DBPath, cfg.DefaultWatch, cfg.MinSeverity)
+	log.Printf("[BOOT] Opening SQLite database at %s...", cfg.DBPath)
+	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		log.Fatalf("[FATAL] Failed to open SQLite store (%s): %v", cfg.DBPath, err)
 	}
 	defer st.Close()
 
-	log.Printf("[INFO] Preloading CISA KEV catalog...")
 	if err := kevClient.EnsureLoaded(ctx); err != nil {
 		log.Printf("[WARN] Initial CISA KEV fetch failed (will retry): %v", err)
 	}
@@ -68,56 +68,89 @@ func main() {
 	defer bot.Stop()
 
 	sevs, _ := st.ListSeverities()
-	curInterval := st.GetPollInterval(cfg.PollInterval)
-	log.Printf("[INFO] Bot is online! Polling NVD + CISA KEV every %s (WatchedSeverities=%v)", curInterval, sevs)
+	newsCats, _ := st.ListNewsCategories()
+	cveInterval := st.GetPollInterval(cfg.DefaultCVEPollInterval)
+	newsInterval := st.GetNewsPollInterval(cfg.DefaultNewsPollInterval)
 
-	// Background poller loop with live interval reload
+	log.Printf("[BOOT] Huginn is online!")
+	log.Printf("[BOOT]   • CVE Poller  : every %s | WatchedSeverities=%v | Channel=%s | SeenCVEs=%d",
+		cveInterval, sevs, emptyOrNone(st.GetAlertChannel("")), st.SeenCount())
+	log.Printf("[BOOT]   • News Poller : every %s | WatchedCategories=%v | Channel=%s | SeenNews=%d",
+		newsInterval, newsCats, emptyOrNone(st.GetNewsAlertChannel("")), st.SeenNewsCount())
+
+	// 1. Independent CVE Background Poller
 	go func() {
-		ticker := time.NewTicker(curInterval)
+		ticker := time.NewTicker(cveInterval)
 		defer ticker.Stop()
 
-		// Initial poll after 10 seconds
 		select {
 		case <-ctx.Done():
 			return
-		case newDur := <-bot.IntervalUpdates():
+		case newDur := <-bot.CVEIntervalUpdates():
 			ticker.Reset(newDur)
-			log.Printf("[INFO] Poll ticker dynamically updated to %s", newDur)
+			log.Printf("[CVE-POLLER] Ticker dynamically updated to %s", newDur)
 		case <-time.After(10 * time.Second):
-			nCVE, err := bot.RunPollCycle(ctx)
-			if err != nil {
-				log.Printf("[WARN] CVE poll cycle error: %v", err)
+			if _, err := bot.RunPollCycle(ctx); err != nil {
+				log.Printf("[CVE-POLLER] Error: %v", err)
 			}
-			nNews, nErr := bot.RunNewsPollCycle(ctx)
-			if nErr != nil {
-				log.Printf("[WARN] News poll cycle error: %v", nErr)
-			}
-			log.Printf("[INFO] Poll cycle complete: %d new CVE(s), %d new article(s) dispatched", nCVE, nNews)
 		}
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case newDur := <-bot.IntervalUpdates():
+			case newDur := <-bot.CVEIntervalUpdates():
 				ticker.Reset(newDur)
-				log.Printf("[INFO] Poll ticker dynamically updated to %s", newDur)
+				log.Printf("[CVE-POLLER] Ticker dynamically updated to %s", newDur)
 			case <-ticker.C:
-				nCVE, err := bot.RunPollCycle(ctx)
-				if err != nil {
-					log.Printf("[WARN] CVE poll cycle error: %v", err)
+				if _, err := bot.RunPollCycle(ctx); err != nil {
+					log.Printf("[CVE-POLLER] Error: %v", err)
 				}
-				nNews, nErr := bot.RunNewsPollCycle(ctx)
-				if nErr != nil {
-					log.Printf("[WARN] News poll cycle error: %v", nErr)
+			}
+		}
+	}()
+
+	// 2. Independent News Background Poller
+	go func() {
+		ticker := time.NewTicker(newsInterval)
+		defer ticker.Stop()
+
+		select {
+		case <-ctx.Done():
+			return
+		case newDur := <-bot.NewsIntervalUpdates():
+			ticker.Reset(newDur)
+			log.Printf("[NEWS-POLLER] Ticker dynamically updated to %s", newDur)
+		case <-time.After(15 * time.Second):
+			if _, err := bot.RunNewsPollCycle(ctx); err != nil {
+				log.Printf("[NEWS-POLLER] Error: %v", err)
+			}
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case newDur := <-bot.NewsIntervalUpdates():
+				ticker.Reset(newDur)
+				log.Printf("[NEWS-POLLER] Ticker dynamically updated to %s", newDur)
+			case <-ticker.C:
+				if _, err := bot.RunNewsPollCycle(ctx); err != nil {
+					log.Printf("[NEWS-POLLER] Error: %v", err)
 				}
-				log.Printf("[INFO] Poll cycle complete: %d new CVE(s), %d new article(s) dispatched", nCVE, nNews)
 			}
 		}
 	}()
 
 	<-ctx.Done()
-	log.Printf("[INFO] Shutting down CVE Discord Bot gracefully...")
+	log.Printf("[SHUTDOWN] Shutting down Huginn gracefully...")
+}
+
+func emptyOrNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }
 
 func runCLIMode(ctx context.Context, nvd *cve.NVDClient, wh *discord.WebhookSender, keyword, cveID, severity string, limit int, sendWebhook bool) {

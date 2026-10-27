@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -47,11 +48,13 @@ func (k *KEVClient) EnsureLoaded(ctx context.Context) error {
 }
 
 func (k *KEVClient) Refresh(ctx context.Context) error {
+	start := time.Now()
+	log.Printf("[KEV] Fetching CISA KEV catalog from cisa.gov...")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cisaKEVFeedURL, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "CVE-Discord-Tracker/1.0")
+	req.Header.Set("User-Agent", "Huginn-ThreatIntel-Bot/1.0")
 
 	resp, err := k.httpClient.Do(req)
 	if err != nil {
@@ -85,6 +88,8 @@ func (k *KEVClient) Refresh(ctx context.Context) error {
 	k.list = sorted
 	k.lastFetch = time.Now()
 	k.mu.Unlock()
+	log.Printf("[KEV] Loaded %d actively exploited vulnerabilities (version=%s, released=%s) in %s",
+		len(newMap), feed.CatalogVersion, feed.DateReleased, time.Since(start).Round(time.Millisecond))
 	return nil
 }
 

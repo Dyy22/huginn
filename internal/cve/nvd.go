@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -239,12 +240,15 @@ func (c *NVDClient) doNVDRequest(ctx context.Context, params url.Values) (*nvdRe
 		return nil, err
 	}
 
+	reqStart := time.Now()
 	reqURL := nvdBaseURL + "?" + params.Encode()
+	log.Printf("[NVD] GET %s", reqURL)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "CVE-Discord-Tracker/1.0")
+	req.Header.Set("User-Agent", "Huginn-ThreatIntel-Bot/1.0")
 	if c.apiKey != "" {
 		req.Header.Set("apiKey", c.apiKey)
 	}
@@ -268,6 +272,8 @@ func (c *NVDClient) doNVDRequest(ctx context.Context, params url.Values) (*nvdRe
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode NVD response: %w", err)
 	}
+	log.Printf("[NVD] Received %d vulnerabilities (totalResults=%d, startIndex=%d) in %s",
+		len(raw.Vulnerabilities), raw.TotalResults, raw.StartIndex, time.Since(reqStart).Round(time.Millisecond))
 	return &raw, nil
 }
 

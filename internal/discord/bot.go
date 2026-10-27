@@ -16,26 +16,28 @@ import (
 )
 
 type Bot struct {
-	cfg        *config.Config
-	session    *discordgo.Session
-	nvd        *cve.NVDClient
-	kev        *cve.KEVClient
-	news       *news.Client
-	store      *store.Store
-	webhook    *WebhookSender
-	cmds       []*discordgo.ApplicationCommand
-	intervalCh chan time.Duration
+	cfg            *config.Config
+	session        *discordgo.Session
+	nvd            *cve.NVDClient
+	kev            *cve.KEVClient
+	news           *news.Client
+	store          *store.Store
+	webhook        *WebhookSender
+	cmds           []*discordgo.ApplicationCommand
+	cveIntervalCh  chan time.Duration
+	newsIntervalCh chan time.Duration
 }
 
 func NewBot(cfg *config.Config, nvd *cve.NVDClient, kev *cve.KEVClient, st *store.Store, wh *WebhookSender) (*Bot, error) {
 	b := &Bot{
-		cfg:        cfg,
-		nvd:        nvd,
-		kev:        kev,
-		news:       news.NewClient(),
-		store:      st,
-		webhook:    wh,
-		intervalCh: make(chan time.Duration, 1),
+		cfg:            cfg,
+		nvd:            nvd,
+		kev:            kev,
+		news:           news.NewClient(),
+		store:          st,
+		webhook:        wh,
+		cveIntervalCh:  make(chan time.Duration, 1),
+		newsIntervalCh: make(chan time.Duration, 1),
 	}
 	if cfg.DiscordBotToken != "" {
 		dg, err := discordgo.New("Bot " + cfg.DiscordBotToken)
@@ -52,9 +54,10 @@ func NewBot(cfg *config.Config, nvd *cve.NVDClient, kev *cve.KEVClient, st *stor
 
 func (b *Bot) Start(ctx context.Context) error {
 	if b.session == nil {
-		log.Printf("[INFO] Running in Webhook-Only Poller Mode (DISCORD_BOT_TOKEN not set; Slash Commands disabled)")
+		log.Printf("[DISCORD] Running in Webhook-Only Poller Mode (DISCORD_BOT_TOKEN not set; Slash Commands disabled)")
 		return nil
 	}
+	log.Printf("[DISCORD] Opening gateway WebSocket session...")
 	if err := b.session.Open(); err != nil {
 		return fmt.Errorf("open discord session: %w", err)
 	}
@@ -63,20 +66,12 @@ func (b *Bot) Start(ctx context.Context) error {
 		appID = b.session.State.User.ID
 	}
 
-	if b.cfg.DiscordGuildID != "" {
-		if err := b.registerCommands(appID, b.cfg.DiscordGuildID); err != nil {
-			log.Printf("[WARN] Failed to register guild slash commands: %v", err)
-		} else {
-			log.Printf("[INFO] Registered /cve & /news slash commands (AppID=%s, GuildID=%s)", appID, b.cfg.DiscordGuildID)
-		}
-	} else {
-		log.Printf("[INFO] Connected to Discord (AppID=%s). Will auto-register /cve & /news commands on each joined server via GuildCreate.", appID)
-	}
+	log.Printf("[DISCORD] Connected as Bot AppID=%s. Waiting for GuildCreate events to instant-register /cve & /news...", appID)
 	return nil
 }
 
 func (b *Bot) onGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
-	if g.Guild == nil || b.cfg.DiscordGuildID != "" {
+	if g.Guild == nil {
 		return
 	}
 	appID := b.cfg.DiscordAppID
@@ -84,20 +79,25 @@ func (b *Bot) onGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
 		appID = s.State.User.ID
 	}
 	if err := b.registerCommands(appID, g.Guild.ID); err != nil {
-		log.Printf("[WARN] Failed to register commands in guild %s (%s): %v", g.Guild.Name, g.Guild.ID, err)
+		log.Printf("[DISCORD] WARN: Failed to register commands in guild %q (%s): %v", g.Guild.Name, g.Guild.ID, err)
 	} else {
-		log.Printf("[INFO] Instant-registered /cve & /news slash commands in server %q (GuildID=%s)", g.Guild.Name, g.Guild.ID)
+		log.Printf("[DISCORD] Registered /cve & /news slash commands in server %q (GuildID=%s)", g.Guild.Name, g.Guild.ID)
 	}
 }
 
 func (b *Bot) Stop() {
 	if b.session != nil {
+		log.Printf("[DISCORD] Closing gateway WebSocket session...")
 		_ = b.session.Close()
 	}
 }
 
-func (b *Bot) IntervalUpdates() <-chan time.Duration {
-	return b.intervalCh
+func (b *Bot) CVEIntervalUpdates() <-chan time.Duration {
+	return b.cveIntervalCh
+}
+
+func (b *Bot) NewsIntervalUpdates() <-chan time.Duration {
+	return b.newsIntervalCh
 }
 
 func (b *Bot) registerCommands(appID, guildID string) error {
@@ -196,7 +196,7 @@ func (b *Bot) registerCommands(appID, guildID string) error {
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommandGroup,
 				Name:        "watch",
-				Description: "Manage watched CVE severities for auto-alerts in this channel",
+				Description: "Manage watched CVE severities and poll interval for this channel",
 				Options: []*discordgo.ApplicationCommandOption{
 					{
 						Type:        discordgo.ApplicationCommandOptionSubCommand,
@@ -229,12 +229,12 @@ func (b *Bot) registerCommands(appID, guildID string) error {
 					{
 						Type:        discordgo.ApplicationCommandOptionSubCommand,
 						Name:        "interval",
-						Description: "Set the auto-poll interval (live reload without restart)",
+						Description: "Set the CVE auto-poll interval (live reload without restart)",
 						Options: []*discordgo.ApplicationCommandOption{
 							{
 								Type:        discordgo.ApplicationCommandOptionString,
 								Name:        "duration",
-								Description: "Poll interval (e.g. 5m, 15m, 30m, 1h, 6h — minimum 1m)",
+								Description: "CVE poll interval (e.g. 5m, 15m, 30m, 1h, 6h — minimum 1m)",
 								Required:    true,
 							},
 						},
@@ -242,7 +242,7 @@ func (b *Bot) registerCommands(appID, guildID string) error {
 					{
 						Type:        discordgo.ApplicationCommandOptionSubCommand,
 						Name:        "list",
-						Description: "List active watched severities and tracker status",
+						Description: "List active watched severities and CVE tracker status",
 					},
 				},
 			},
@@ -336,8 +336,21 @@ func (b *Bot) registerCommands(appID, guildID string) error {
 					},
 					{
 						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        "interval",
+						Description: "Set the News auto-poll interval (live reload without restart)",
+						Options: []*discordgo.ApplicationCommandOption{
+							{
+								Type:        discordgo.ApplicationCommandOptionString,
+								Name:        "duration",
+								Description: "News poll interval (e.g. 5m, 15m, 30m, 1h, 6h — minimum 1m)",
+								Required:    true,
+							},
+						},
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
 						Name:        "list",
-						Description: "Show watched news categories and bound channel status",
+						Description: "Show watched news categories, interval, and bound channel status",
 					},
 				},
 			},
@@ -368,7 +381,20 @@ func (b *Bot) onInteractionCreate(s *discordgo.Session, i *discordgo.Interaction
 		return
 	}
 
+	user := "unknown"
+	if i.Member != nil && i.Member.User != nil {
+		user = fmt.Sprintf("%s (%s)", i.Member.User.Username, i.Member.User.ID)
+	} else if i.User != nil {
+		user = fmt.Sprintf("%s (%s)", i.User.Username, i.User.ID)
+	}
+
 	top := data.Options[0]
+	subPath := "/" + data.Name + " " + top.Name
+	if top.Type == discordgo.ApplicationCommandOptionSubCommandGroup && len(top.Options) > 0 {
+		subPath += " " + top.Options[0].Name
+	}
+	log.Printf("[CMD] User=%s Channel=%s invoked %s", user, i.ChannelID, subPath)
+
 	switch data.Name {
 	case "cve":
 		switch top.Name {
@@ -423,6 +449,8 @@ func (b *Bot) handleSearch(s *discordgo.Session, i *discordgo.InteractionCreate,
 		}
 	}
 
+	log.Printf("[CMD] /cve search keyword=%q severity=%q limit=%d push_webhook=%v", keyword, severity, limit, pushWebhook)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -432,10 +460,12 @@ func (b *Bot) handleSearch(s *discordgo.Session, i *discordgo.InteractionCreate,
 		Limit:    limit,
 	})
 	if err != nil {
+		log.Printf("[CMD] /cve search error: %v", err)
 		b.editDeferredError(s, i, fmt.Sprintf("❌ Failed to query NVD API: `%v`", err))
 		return
 	}
 	if len(items) == 0 {
+		log.Printf("[CMD] /cve search returned 0 results for keyword=%q", keyword)
 		b.editDeferredError(s, i, fmt.Sprintf("🔍 No CVEs found matching keyword **`%s`** (severity: `%s`).", keyword, emptyDefault(severity, "ANY")))
 		return
 	}
@@ -462,6 +492,7 @@ func (b *Bot) handleSearch(s *discordgo.Session, i *discordgo.InteractionCreate,
 		Content: &header,
 		Embeds:  &embeds,
 	})
+	log.Printf("[CMD] /cve search delivered %d embed(s) (totalMatches=%d)", len(embeds), total)
 }
 
 func (b *Bot) handleLookup(s *discordgo.Session, i *discordgo.InteractionCreate, opts []*discordgo.ApplicationCommandInteractionDataOption) {
@@ -480,6 +511,8 @@ func (b *Bot) handleLookup(s *discordgo.Session, i *discordgo.InteractionCreate,
 		}
 	}
 
+	log.Printf("[CMD] /cve lookup id=%q push_webhook=%v", cveID, pushWebhook)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -488,10 +521,12 @@ func (b *Bot) handleLookup(s *discordgo.Session, i *discordgo.InteractionCreate,
 		Limit: 1,
 	})
 	if err != nil {
+		log.Printf("[CMD] /cve lookup error for %s: %v", cveID, err)
 		b.editDeferredError(s, i, fmt.Sprintf("❌ NVD lookup failed for `%s`: `%v`", cveID, err))
 		return
 	}
 	if len(items) == 0 {
+		log.Printf("[CMD] /cve lookup: %s not found", cveID)
 		b.editDeferredError(s, i, fmt.Sprintf("🔍 CVE **`%s`** was not found in NVD.", cveID))
 		return
 	}
@@ -510,6 +545,7 @@ func (b *Bot) handleLookup(s *discordgo.Session, i *discordgo.InteractionCreate,
 		Content: &content,
 		Embeds:  &embeds,
 	})
+	log.Printf("[CMD] /cve lookup delivered embed for %s (Score=%.1f %s)", items[0].ID, items[0].BaseScore, items[0].Severity)
 }
 
 func (b *Bot) handleKEV(s *discordgo.Session, i *discordgo.InteractionCreate, opts []*discordgo.ApplicationCommandInteractionDataOption) {
@@ -528,11 +564,14 @@ func (b *Bot) handleKEV(s *discordgo.Session, i *discordgo.InteractionCreate, op
 		}
 	}
 
+	log.Printf("[CMD] /cve kev keyword=%q limit=%d", keyword, limit)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
 	entries, err := b.kev.Latest(ctx, limit, keyword)
 	if err != nil {
+		log.Printf("[CMD] /cve kev error: %v", err)
 		b.editDeferredError(s, i, fmt.Sprintf("❌ Failed to load CISA KEV catalog: `%v`", err))
 		return
 	}
@@ -554,6 +593,7 @@ func (b *Bot) handleKEV(s *discordgo.Session, i *discordgo.InteractionCreate, op
 		Content: &header,
 		Embeds:  &embeds,
 	})
+	log.Printf("[CMD] /cve kev delivered %d KEV embed(s)", len(embeds))
 }
 
 func (b *Bot) handleWatch(s *discordgo.Session, i *discordgo.InteractionCreate, sub *discordgo.ApplicationCommandInteractionDataOption) {
@@ -568,12 +608,9 @@ func (b *Bot) handleWatch(s *discordgo.Session, i *discordgo.InteractionCreate, 
 				_ = b.store.SetAlertChannel(i.ChannelID)
 			}
 			active, _ := b.store.ListSeverities()
-			chID := b.store.GetAlertChannel(b.cfg.DiscordAlertChannelID)
-			chNotice := ""
-			if chID != "" {
-				chNotice = fmt.Sprintf(" • Alert Channel: <#%s>", chID)
-			}
-			msg = fmt.Sprintf("✅ Added **`%s`** to watched severities! (Active: `%s`%s)", sev, strings.Join(active, "`, `"), chNotice)
+			chID := b.store.GetAlertChannel("")
+			log.Printf("[CVE-WATCH] Added severity=%s boundChannel=%s activeSeverities=%v", sev, chID, active)
+			msg = fmt.Sprintf("✅ Added **`%s`** to watched severities! (Active: `%s` • Alert Channel: <#%s>)", sev, strings.Join(active, "`, `"), chID)
 		}
 	case "remove":
 		sev := strings.ToUpper(strings.TrimSpace(sub.Options[0].StringValue()))
@@ -584,6 +621,7 @@ func (b *Bot) handleWatch(s *discordgo.Session, i *discordgo.InteractionCreate, 
 			msg = fmt.Sprintf("⚠️ Severity **`%s`** was not in the watchlist.", sev)
 		} else {
 			active, _ := b.store.ListSeverities()
+			log.Printf("[CVE-WATCH] Removed severity=%s activeSeverities=%v", sev, active)
 			activeStr := "_None (auto-alerts paused)_"
 			if len(active) > 0 {
 				activeStr = "`" + strings.Join(active, "`, `") + "`"
@@ -599,18 +637,11 @@ func (b *Bot) handleWatch(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		if err != nil || d < time.Minute {
 			msg = "❌ Invalid duration! Use a format like `5m`, `15m`, `30m`, `1h`, or `6h` (minimum `1m`)."
 		} else if err := b.store.SetPollInterval(d); err != nil {
-			msg = fmt.Sprintf("❌ Failed to save poll interval: `%v`", err)
+			msg = fmt.Sprintf("❌ Failed to save CVE poll interval: `%v`", err)
 		} else {
-			select {
-			case b.intervalCh <- d:
-			default:
-				select {
-				case <-b.intervalCh:
-				default:
-				}
-				b.intervalCh <- d
-			}
-			msg = fmt.Sprintf("⏱️ Poll interval updated to **`%s`** (live-reloaded immediately)!", d)
+			pushDuration(b.cveIntervalCh, d)
+			log.Printf("[CVE-WATCH] Updated CVE poll interval to %s", d)
+			msg = fmt.Sprintf("⏱️ **CVE** poll interval updated to **`%s`** (live-reloaded immediately)!", d)
 		}
 	case "list":
 		sevs, _ := b.store.ListSeverities()
@@ -623,16 +654,16 @@ func (b *Bot) handleWatch(s *discordgo.Session, i *discordgo.InteractionCreate, 
 			whStatus = "✅ Configured"
 		}
 		chStatus := "❌ Not set"
-		if chID := b.store.GetAlertChannel(b.cfg.DiscordAlertChannelID); chID != "" {
+		if chID := b.store.GetAlertChannel(""); chID != "" {
 			chStatus = fmt.Sprintf("<#%s>", chID)
 		}
-		curInterval := b.store.GetPollInterval(b.cfg.PollInterval)
+		curInterval := b.store.GetPollInterval(b.cfg.DefaultCVEPollInterval)
 		msg = fmt.Sprintf(
 			"📡 **Huginn CVE Auto-Tracker Configuration**\n"+
 				"• **Watched Severities:** %s\n"+
-				"• **Poll Interval:** `%s`\n"+
+				"• **CVE Poll Interval:** `%s`\n"+
 				"• **Webhook Output:** %s\n"+
-				"• **Alert Channel:** %s\n"+
+				"• **CVE Alert Channel:** %s\n"+
 				"• **Tracked CVEs in DB:** `%d`",
 			sevDisplay, curInterval, whStatus, chStatus, b.store.SeenCount(),
 		)
@@ -651,7 +682,7 @@ func (b *Bot) handlePollNow(s *discordgo.Session, i *discordgo.InteractionCreate
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	})
 
-	if b.store.GetAlertChannel(b.cfg.DiscordAlertChannelID) == "" && i.ChannelID != "" {
+	if b.store.GetAlertChannel("") == "" && i.ChannelID != "" {
 		_ = b.store.SetAlertChannel(i.ChannelID)
 	}
 
@@ -661,7 +692,7 @@ func (b *Bot) handlePollNow(s *discordgo.Session, i *discordgo.InteractionCreate
 	sent, err := b.RunPollCycle(ctx)
 	var content string
 	if err != nil {
-		content = fmt.Sprintf("⚠️ Poll cycle finished with error: `%v` (Alerts dispatched: **%d**)", err, sent)
+		content = fmt.Sprintf("⚠️ CVE poll cycle finished with error: `%v` (Alerts dispatched: **%d**)", err, sent)
 	} else {
 		content = fmt.Sprintf("✅ Manual CVE poll cycle complete! Dispatched **%d** new CVE alert(s).", sent)
 	}
@@ -690,12 +721,15 @@ func (b *Bot) handleNewsLatest(s *discordgo.Session, i *discordgo.InteractionCre
 		}
 	}
 
+	log.Printf("[CMD] /news latest category=%q limit=%d", category, limit)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	_ = b.kev.EnsureLoaded(ctx)
 	articles, err := b.news.Fetch(ctx, []string{category}, "", limit)
 	if err != nil {
+		log.Printf("[CMD] /news latest error: %v", err)
 		b.editDeferredError(s, i, fmt.Sprintf("❌ Failed to fetch cybersecurity feeds: `%v`", err))
 		return
 	}
@@ -714,6 +748,7 @@ func (b *Bot) handleNewsLatest(s *discordgo.Session, i *discordgo.InteractionCre
 		Content: &header,
 		Embeds:  &embeds,
 	})
+	log.Printf("[CMD] /news latest delivered %d article embed(s)", len(embeds))
 }
 
 func (b *Bot) handleNewsSearch(s *discordgo.Session, i *discordgo.InteractionCreate, opts []*discordgo.ApplicationCommandInteractionDataOption) {
@@ -732,16 +767,20 @@ func (b *Bot) handleNewsSearch(s *discordgo.Session, i *discordgo.InteractionCre
 		}
 	}
 
+	log.Printf("[CMD] /news search keyword=%q limit=%d", keyword, limit)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	_ = b.kev.EnsureLoaded(ctx)
 	articles, err := b.news.Fetch(ctx, nil, keyword, limit)
 	if err != nil {
+		log.Printf("[CMD] /news search error: %v", err)
 		b.editDeferredError(s, i, fmt.Sprintf("❌ Failed to search news feeds: `%v`", err))
 		return
 	}
 	if len(articles) == 0 {
+		log.Printf("[CMD] /news search: 0 articles matched %q", keyword)
 		b.editDeferredError(s, i, fmt.Sprintf("🔍 No articles found matching **`%s`** across active RSS feeds.", keyword))
 		return
 	}
@@ -756,6 +795,7 @@ func (b *Bot) handleNewsSearch(s *discordgo.Session, i *discordgo.InteractionCre
 		Content: &header,
 		Embeds:  &embeds,
 	})
+	log.Printf("[CMD] /news search delivered %d article embed(s) for keyword=%q", len(embeds), keyword)
 }
 
 func (b *Bot) handleNewsWatch(s *discordgo.Session, i *discordgo.InteractionCreate, sub *discordgo.ApplicationCommandInteractionDataOption) {
@@ -774,6 +814,7 @@ func (b *Bot) handleNewsWatch(s *discordgo.Session, i *discordgo.InteractionCrea
 			}
 			active, _ := b.store.ListNewsCategories()
 			chID := b.store.GetNewsAlertChannel("")
+			log.Printf("[NEWS-WATCH] Added category=%s boundChannel=%s activeCategories=%v", cat, chID, active)
 			msg = fmt.Sprintf("📰 Subscribed <#%s> to cybersecurity news feeds! (Active Categories: `%s`)", chID, strings.Join(active, "`, `"))
 		}
 	case "remove":
@@ -788,11 +829,27 @@ func (b *Bot) handleNewsWatch(s *discordgo.Session, i *discordgo.InteractionCrea
 			msg = fmt.Sprintf("⚠️ Category **`%s`** was not in the news watchlist.", cat)
 		} else {
 			active, _ := b.store.ListNewsCategories()
+			log.Printf("[NEWS-WATCH] Removed category=%s activeCategories=%v", cat, active)
 			activeStr := "_None (news auto-alerts paused)_"
 			if len(active) > 0 {
 				activeStr = "`" + strings.Join(active, "`, `") + "`"
 			}
 			msg = fmt.Sprintf("🗑️ Removed **`%s`** from news watchlist. (Active: %s)", cat, activeStr)
+		}
+	case "interval":
+		raw := strings.ToLower(strings.TrimSpace(sub.Options[0].StringValue()))
+		if _, err := fmt.Sscanf(raw, "%d", new(int)); err == nil && !strings.ContainsAny(raw, "smhd") {
+			raw += "m"
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < time.Minute {
+			msg = "❌ Invalid duration! Use a format like `5m`, `15m`, `30m`, `1h`, or `6h` (minimum `1m`)."
+		} else if err := b.store.SetNewsPollInterval(d); err != nil {
+			msg = fmt.Sprintf("❌ Failed to save News poll interval: `%v`", err)
+		} else {
+			pushDuration(b.newsIntervalCh, d)
+			log.Printf("[NEWS-WATCH] Updated News poll interval to %s", d)
+			msg = fmt.Sprintf("⏱️ **News** poll interval updated to **`%s`** (live-reloaded immediately)!", d)
 		}
 	case "list":
 		cats, _ := b.store.ListNewsCategories()
@@ -804,15 +861,15 @@ func (b *Bot) handleNewsWatch(s *discordgo.Session, i *discordgo.InteractionCrea
 		if chID := b.store.GetNewsAlertChannel(""); chID != "" {
 			chStatus = fmt.Sprintf("<#%s>", chID)
 		}
-		curInterval := b.store.GetPollInterval(b.cfg.PollInterval)
+		curInterval := b.store.GetNewsPollInterval(b.cfg.DefaultNewsPollInterval)
 		msg = fmt.Sprintf(
 			"📰 **Huginn Cybersec News Radar Configuration**\n"+
 				"• **Watched Categories:** %s\n"+
+				"• **News Poll Interval:** `%s`\n"+
 				"• **News Alert Channel:** %s\n"+
-				"• **Poll Interval:** `%s`\n"+
 				"• **Sources:** `The Hacker News`, `BleepingComputer`, `Dark Reading`, `PortSwigger Research`, `Project Zero`, `watchTowr Labs`, `ZDI`, `Intigriti`\n"+
 				"• **Tracked Articles in DB:** `%d`",
-			catDisplay, chStatus, curInterval, b.store.SeenNewsCount(),
+			catDisplay, curInterval, chStatus, b.store.SeenNewsCount(),
 		)
 	}
 
@@ -851,18 +908,30 @@ func (b *Bot) handleNewsPollNow(s *discordgo.Session, i *discordgo.InteractionCr
 	})
 }
 
-// RunPollCycle fetches recent CVEs from NVD, filters by watched severities,
-// deduplicates via SQLite, and dispatches Rich Embeds via Webhook and/or Alert Channel.
+// ==========================================
+// Background Poll Cycles (CVE & News)
+// ==========================================
+
 func (b *Bot) RunPollCycle(ctx context.Context) (int, error) {
+	cycleStart := time.Now()
 	watchedSevs, _ := b.store.ListSeverities()
+	alertChannelID := b.store.GetAlertChannel("")
+
 	if len(watchedSevs) == 0 {
+		log.Printf("[CVE-POLL] Skipped: no severities watched (use /cve watch add)")
+		return 0, nil
+	}
+	if alertChannelID == "" && !b.webhook.Enabled() {
+		log.Printf("[CVE-POLL] Skipped: no alert channel or webhook bound yet (run /cve watch add in a Discord channel)")
 		return 0, nil
 	}
 
 	now := time.Now().UTC()
 	start := now.Add(-time.Duration(b.cfg.LookbackHours) * time.Hour)
+	log.Printf("[CVE-POLL] Starting cycle (window=%dh, watchedSeverities=%v, channel=%s, webhook=%v)",
+		b.cfg.LookbackHours, watchedSevs, emptyDefault(alertChannelID, "none"), b.webhook.Enabled())
 
-	items, _, err := b.nvd.Search(ctx, cve.SearchOptions{
+	items, total, err := b.nvd.Search(ctx, cve.SearchOptions{
 		PubStartDate: &start,
 		PubEndDate:   &now,
 		Limit:        100,
@@ -871,21 +940,28 @@ func (b *Bot) RunPollCycle(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	var matched []cve.CVEItem
+	var (
+		matched     []cve.CVEItem
+		skippedSeen int
+		skippedSev  int
+	)
 	for _, item := range items {
 		if b.store.IsSeen(item.ID) {
+			skippedSeen++
 			continue
 		}
-
-		// CISA KEV always matches if at least one severity is watched; otherwise check if item.Severity is in watched_severities
 		if item.KEV == nil && !b.store.IsSeverityWatched(item.Severity) {
+			skippedSev++
 			continue
 		}
-
 		matched = append(matched, item)
 	}
 
+	log.Printf("[CVE-POLL] Evaluated %d tail CVEs (24h total=%d): %d new matched, %d already seen, %d filtered by severity",
+		len(items), total, len(matched), skippedSeen, skippedSev)
+
 	if len(matched) == 0 {
+		log.Printf("[CVE-POLL] Cycle finished in %s (0 new CVEs to dispatch)", time.Since(cycleStart).Round(time.Millisecond))
 		return 0, nil
 	}
 
@@ -898,21 +974,23 @@ func (b *Bot) RunPollCycle(ctx context.Context) (int, error) {
 	dispatched := false
 
 	if b.webhook != nil && b.webhook.Enabled() {
+		log.Printf("[CVE-POLL] Pushing %d CVE embed(s) to Discord Webhook...", len(embeds))
 		if err := b.webhook.SendEmbeds(ctx, header, embeds); err != nil {
 			return 0, fmt.Errorf("webhook dispatch: %w", err)
 		}
 		dispatched = true
 	}
 
-	alertChannelID := b.store.GetAlertChannel(b.cfg.DiscordAlertChannelID)
 	if b.session != nil && alertChannelID != "" {
 		for idx, emb := range embeds {
+			m := matched[idx]
+			log.Printf("[CVE-POLL] Sending %s (CVSS %.1f %s) to channel %s (%d/%d)...", m.ID, m.BaseScore, m.Severity, alertChannelID, idx+1, len(embeds))
 			msg := &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{emb}}
 			if idx == 0 {
 				msg.Content = header
 			}
 			if _, err := b.session.ChannelMessageSendComplex(alertChannelID, msg); err != nil {
-				log.Printf("[WARN] Failed sending alert to channel %s: %v", alertChannelID, err)
+				log.Printf("[CVE-POLL] WARN: Failed sending %s to channel %s: %v", m.ID, alertChannelID, err)
 			} else {
 				dispatched = true
 			}
@@ -925,21 +1003,26 @@ func (b *Bot) RunPollCycle(ctx context.Context) (int, error) {
 		}
 	}
 
+	log.Printf("[CVE-POLL] Cycle finished in %s: dispatched %d new CVE alert(s) (totalSeenInDB=%d)",
+		time.Since(cycleStart).Round(time.Millisecond), len(matched), b.store.SeenCount())
 	return len(matched), nil
 }
 
-// RunNewsPollCycle fetches watched cybersecurity RSS feeds, deduplicates via SQLite,
-// and dispatches new articles to the bound News Alert Channel.
 func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
+	cycleStart := time.Now()
 	cats, _ := b.store.ListNewsCategories()
+	newsChannelID := b.store.GetNewsAlertChannel("")
+
 	if len(cats) == 0 {
+		log.Printf("[NEWS-POLL] Skipped: no news categories watched (run /news watch add in a Discord channel)")
+		return 0, nil
+	}
+	if newsChannelID == "" && !b.webhook.Enabled() {
+		log.Printf("[NEWS-POLL] Skipped: no news alert channel bound yet (run /news watch add in a Discord channel)")
 		return 0, nil
 	}
 
-	newsChannelID := b.store.GetNewsAlertChannel("")
-	if newsChannelID == "" && !b.webhook.Enabled() {
-		return 0, nil
-	}
+	log.Printf("[NEWS-POLL] Starting cycle (categories=%v, channel=%s)", cats, emptyDefault(newsChannelID, "webhook"))
 
 	_ = b.kev.EnsureLoaded(ctx)
 	articles, err := b.news.Fetch(ctx, cats, "", 40)
@@ -948,24 +1031,31 @@ func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
 	}
 
 	isFirstSeed := b.store.SeenNewsCount() == 0
-	var unseen []news.Article
+	var (
+		unseen      []news.Article
+		skippedSeen int
+	)
 	for _, art := range articles {
-		if !b.store.IsNewsSeen(art.URL) {
-			unseen = append(unseen, art)
+		if b.store.IsNewsSeen(art.URL) {
+			skippedSeen++
+			continue
 		}
+		unseen = append(unseen, art)
 	}
 
+	log.Printf("[NEWS-POLL] Evaluated %d articles: %d unseen, %d already seen in DB", len(articles), len(unseen), skippedSeen)
+
 	if len(unseen) == 0 {
+		log.Printf("[NEWS-POLL] Cycle finished in %s (0 new articles to dispatch)", time.Since(cycleStart).Round(time.Millisecond))
 		return 0, nil
 	}
 
-	// Avoid flooding dozens of historical RSS items on initial subscription:
-	// send the 5 newest articles and mark the older backlog as seen.
 	toSend := unseen
 	var backlog []news.Article
 	if isFirstSeed && len(unseen) > 5 {
 		toSend = unseen[:5]
 		backlog = unseen[5:]
+		log.Printf("[NEWS-POLL] Initial seed detected: sending 5 newest articles and marking %d older backlog articles as seen", len(backlog))
 	} else if len(unseen) > 10 {
 		toSend = unseen[:10]
 	}
@@ -980,17 +1070,20 @@ func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
 
 	if b.session != nil && newsChannelID != "" {
 		for idx, emb := range embeds {
+			art := toSend[idx]
+			log.Printf("[NEWS-POLL] Sending [%s] %q to channel %s (%d/%d)...", art.Source, art.Title, newsChannelID, idx+1, len(embeds))
 			msg := &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{emb}}
 			if idx == 0 {
 				msg.Content = header
 			}
 			if _, err := b.session.ChannelMessageSendComplex(newsChannelID, msg); err != nil {
-				log.Printf("[WARN] Failed sending news to channel %s: %v", newsChannelID, err)
+				log.Printf("[NEWS-POLL] WARN: Failed sending article to channel %s: %v", newsChannelID, err)
 			} else {
 				dispatched = true
 			}
 		}
 	} else if b.webhook != nil && b.webhook.Enabled() {
+		log.Printf("[NEWS-POLL] Pushing %d article embed(s) to Discord Webhook...", len(embeds))
 		if err := b.webhook.SendEmbeds(ctx, header, embeds); err != nil {
 			return 0, fmt.Errorf("news webhook dispatch: %w", err)
 		}
@@ -1006,7 +1099,21 @@ func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
 		}
 	}
 
+	log.Printf("[NEWS-POLL] Cycle finished in %s: dispatched %d new article(s) (totalSeenNewsInDB=%d)",
+		time.Since(cycleStart).Round(time.Millisecond), len(toSend), b.store.SeenNewsCount())
 	return len(toSend), nil
+}
+
+func pushDuration(ch chan time.Duration, d time.Duration) {
+	select {
+	case ch <- d:
+	default:
+		select {
+		case <-ch:
+		default:
+		}
+		ch <- d
+	}
 }
 
 func (b *Bot) editDeferredError(s *discordgo.Session, i *discordgo.InteractionCreate, msg string) {

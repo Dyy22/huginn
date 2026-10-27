@@ -14,7 +14,7 @@ type Store struct {
 	db *sql.DB
 }
 
-func Open(path string, _ []string, defaultMinSeverity string) (*Store, error) {
+func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -52,11 +52,11 @@ func Open(path string, _ []string, defaultMinSeverity string) (*Store, error) {
 
 	s := &Store{db: db}
 
-	// Seed default watched severities once based on defaultMinSeverity
+	// Seed default watched severities (CRITICAL + HIGH) once on fresh DB
 	var seeded string
 	_ = db.QueryRow(`SELECT value FROM settings WHERE key = 'severities_seeded'`).Scan(&seeded)
-	if seeded == "" && defaultMinSeverity != "" {
-		minRank := config.SeverityRank(defaultMinSeverity)
+	if seeded == "" {
+		minRank := config.SeverityRank("HIGH")
 		for _, sev := range []string{"CRITICAL", "HIGH", "MEDIUM", "LOW"} {
 			if config.SeverityRank(sev) >= minRank {
 				_ = s.AddSeverity(sev)
@@ -278,6 +278,26 @@ func (s *Store) SetNewsAlertChannel(channelID string) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO settings (key, value) VALUES ('news_alert_channel_id', ?)`,
 		strings.TrimSpace(channelID),
+	)
+	return err
+}
+
+func (s *Store) GetNewsPollInterval(fallback time.Duration) time.Duration {
+	var val string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = 'news_poll_interval'`).Scan(&val)
+	if err != nil || strings.TrimSpace(val) == "" {
+		return fallback
+	}
+	if d, err := time.ParseDuration(strings.TrimSpace(val)); err == nil && d >= time.Minute {
+		return d
+	}
+	return fallback
+}
+
+func (s *Store) SetNewsPollInterval(d time.Duration) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO settings (key, value) VALUES ('news_poll_interval', ?)`,
+		d.String(),
 	)
 	return err
 }
