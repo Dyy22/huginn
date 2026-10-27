@@ -31,6 +31,15 @@ func Open(path string, _ []string, defaultMinSeverity string) (*Store, error) {
 		severity TEXT PRIMARY KEY,
 		added_at DATETIME NOT NULL
 	);
+	CREATE TABLE IF NOT EXISTS seen_news (
+		url TEXT PRIMARY KEY,
+		source TEXT NOT NULL,
+		notified_at DATETIME NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS watched_news_categories (
+		category TEXT PRIMARY KEY,
+		added_at DATETIME NOT NULL
+	);
 	CREATE TABLE IF NOT EXISTS settings (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL
@@ -173,6 +182,102 @@ func (s *Store) SetPollInterval(d time.Duration) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO settings (key, value) VALUES ('poll_interval', ?)`,
 		d.String(),
+	)
+	return err
+}
+
+func (s *Store) IsNewsSeen(url string) bool {
+	var u string
+	err := s.db.QueryRow(`SELECT url FROM seen_news WHERE url = ?`, strings.TrimSpace(url)).Scan(&u)
+	return err == nil
+}
+
+func (s *Store) MarkNewsSeen(url, source string) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO seen_news (url, source, notified_at) VALUES (?, ?, ?)`,
+		strings.TrimSpace(url),
+		strings.TrimSpace(source),
+		time.Now().UTC(),
+	)
+	return err
+}
+
+func (s *Store) SeenNewsCount() int {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM seen_news`).Scan(&count)
+	return count
+}
+
+func (s *Store) AddNewsCategory(cat string) error {
+	cat = strings.ToLower(strings.TrimSpace(cat))
+	if cat == "" {
+		return nil
+	}
+	if cat == "all" {
+		for _, c := range []string{"breaking", "research", "writeups"} {
+			_, _ = s.db.Exec(`INSERT OR IGNORE INTO watched_news_categories (category, added_at) VALUES (?, ?)`, c, time.Now().UTC())
+		}
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO watched_news_categories (category, added_at) VALUES (?, ?)`, cat, time.Now().UTC())
+	return err
+}
+
+func (s *Store) RemoveNewsCategory(cat string) (bool, error) {
+	cat = strings.ToLower(strings.TrimSpace(cat))
+	if cat == "all" {
+		res, err := s.db.Exec(`DELETE FROM watched_news_categories`)
+		if err != nil {
+			return false, err
+		}
+		n, _ := res.RowsAffected()
+		return n > 0, nil
+	}
+	res, err := s.db.Exec(`DELETE FROM watched_news_categories WHERE category = ?`, cat)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func (s *Store) ListNewsCategories() ([]string, error) {
+	rows, err := s.db.Query(`SELECT category FROM watched_news_categories`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	active := make(map[string]bool)
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err == nil {
+			active[strings.ToLower(strings.TrimSpace(c))] = true
+		}
+	}
+
+	var ordered []string
+	for _, c := range []string{"breaking", "research", "writeups"} {
+		if active[c] {
+			ordered = append(ordered, c)
+		}
+	}
+	return ordered, nil
+}
+
+func (s *Store) GetNewsAlertChannel(fallback string) string {
+	var val string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = 'news_alert_channel_id'`).Scan(&val)
+	if err != nil || strings.TrimSpace(val) == "" {
+		return strings.TrimSpace(fallback)
+	}
+	return strings.TrimSpace(val)
+}
+
+func (s *Store) SetNewsAlertChannel(channelID string) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO settings (key, value) VALUES ('news_alert_channel_id', ?)`,
+		strings.TrimSpace(channelID),
 	)
 	return err
 }

@@ -84,11 +84,15 @@ func main() {
 			ticker.Reset(newDur)
 			log.Printf("[INFO] Poll ticker dynamically updated to %s", newDur)
 		case <-time.After(10 * time.Second):
-			if n, err := bot.RunPollCycle(ctx); err != nil {
-				log.Printf("[WARN] Poll cycle error: %v", err)
-			} else {
-				log.Printf("[INFO] Poll cycle complete: %d new CVE alert(s) dispatched", n)
+			nCVE, err := bot.RunPollCycle(ctx)
+			if err != nil {
+				log.Printf("[WARN] CVE poll cycle error: %v", err)
 			}
+			nNews, nErr := bot.RunNewsPollCycle(ctx)
+			if nErr != nil {
+				log.Printf("[WARN] News poll cycle error: %v", nErr)
+			}
+			log.Printf("[INFO] Poll cycle complete: %d new CVE(s), %d new article(s) dispatched", nCVE, nNews)
 		}
 
 		for {
@@ -99,11 +103,15 @@ func main() {
 				ticker.Reset(newDur)
 				log.Printf("[INFO] Poll ticker dynamically updated to %s", newDur)
 			case <-ticker.C:
-				if n, err := bot.RunPollCycle(ctx); err != nil {
-					log.Printf("[WARN] Poll cycle error: %v", err)
-				} else {
-					log.Printf("[INFO] Poll cycle complete: %d new CVE alert(s) dispatched", n)
+				nCVE, err := bot.RunPollCycle(ctx)
+				if err != nil {
+					log.Printf("[WARN] CVE poll cycle error: %v", err)
 				}
+				nNews, nErr := bot.RunNewsPollCycle(ctx)
+				if nErr != nil {
+					log.Printf("[WARN] News poll cycle error: %v", nErr)
+				}
+				log.Printf("[INFO] Poll cycle complete: %d new CVE(s), %d new article(s) dispatched", nCVE, nNews)
 			}
 		}
 	}()

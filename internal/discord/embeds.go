@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cve-discord-bot/internal/cve"
+	"cve-discord-bot/internal/news"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -460,4 +461,81 @@ func limitSlice(in []string, max int) []string {
 		return in
 	}
 	return in[:max]
+}
+
+// BuildNewsEmbed creates a magazine-style Rich Embed for a cybersecurity news article or writeup.
+func BuildNewsEmbed(art news.Article, kev *cve.KEVClient) *discordgo.MessageEmbed {
+	color := 0x00B4D8 // Cyber Cyan (Breaking)
+	catLabel := "🔥 BREAKING CYBERSEC"
+	switch strings.ToLower(art.Category) {
+	case "research":
+		color = 0x9B59B6 // Deep Purple
+		catLabel = "🔬 ZERO-DAY & EXPLOIT RESEARCH"
+	case "writeups":
+		color = 0x1ABC9C // Neon Teal
+		catLabel = "🎯 BUG BOUNTY & PENTEST WRITEUP"
+	}
+
+	summary := strings.TrimSpace(art.Summary)
+	if summary == "" {
+		summary = "Click the headline above to read the full article."
+	}
+	desc := formatBlockquote(truncate(summary, 420))
+
+	var fields []*discordgo.MessageEmbedField
+
+	// Auto-link any CVEs mentioned in the article + check against CISA KEV
+	if len(art.MentionedCVEs) > 0 {
+		var cveBadges []string
+		for _, id := range limitSlice(art.MentionedCVEs, 5) {
+			nvdURL := "https://nvd.nist.gov/vuln/detail/" + id
+			tag := fmt.Sprintf("[`%s`](%s)", id, nvdURL)
+			if kev != nil && kev.Lookup(id) != nil {
+				tag += " 🚨*(CISA KEV)*"
+				color = ColorKEV
+			}
+			cveBadges = append(cveBadges, tag)
+		}
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "🛡️ Referenced CVEs in Article",
+			Value:  strings.Join(cveBadges, "  •  "),
+			Inline: false,
+		})
+	}
+
+	fields = append(fields, &discordgo.MessageEmbedField{
+		Name:   "📡 Feed Source",
+		Value:  fmt.Sprintf("**%s** (`%s`)", art.Source, strings.ToUpper(art.Category)),
+		Inline: true,
+	})
+
+	fields = append(fields, &discordgo.MessageEmbedField{
+		Name:   "🔗 Quick Read",
+		Value:  fmt.Sprintf("**[Read Full Article ↗](%s)**", art.URL),
+		Inline: true,
+	})
+
+	pubStr := art.Published.UTC().Format("02 Jan 2006 15:04 UTC")
+	emb := &discordgo.MessageEmbed{
+		Author: &discordgo.MessageEmbedAuthor{
+			Name: fmt.Sprintf("%s  •  %s", strings.ToUpper(art.Source), catLabel),
+		},
+		Title:       truncate(art.Title, 220),
+		URL:         art.URL,
+		Description: desc,
+		Color:       color,
+		Fields:      fields,
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: fmt.Sprintf("🐦‍⬛ Huginn Cybersec News Radar • Published %s", pubStr),
+		},
+		Timestamp: art.Published.UTC().Format(time.RFC3339),
+	}
+
+	if strings.HasPrefix(art.ImageURL, "https://") {
+		emb.Thumbnail = &discordgo.MessageEmbedThumbnail{
+			URL: art.ImageURL,
+		}
+	}
+
+	return emb
 }

@@ -1,4 +1,4 @@
-cvebot
+/cvebot
 *.db
 *.db-journal
 *.db-wal
