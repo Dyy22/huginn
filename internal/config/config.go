@@ -9,11 +9,10 @@ import (
 )
 
 type Config struct {
-	DiscordBotToken   string
-	DiscordAppID      string
-	DiscordWebhookURL string
-	NVDAPIKey         string
-	DBPath            string
+	DiscordBotToken string
+	DiscordAppID    string
+	NVDAPIKey       string
+	DBPath          string
 
 	DefaultCVEPollInterval  time.Duration
 	DefaultNewsPollInterval time.Duration
@@ -31,7 +30,6 @@ func Load() *Config {
 	return &Config{
 		DiscordBotToken:         strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")),
 		DiscordAppID:            strings.TrimSpace(os.Getenv("DISCORD_APP_ID")),
-		DiscordWebhookURL:       strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK_URL")),
 		NVDAPIKey:               strings.TrimSpace(os.Getenv("NVD_API_KEY")),
 		DBPath:                  dbPath,
 		DefaultCVEPollInterval:  15 * time.Minute,

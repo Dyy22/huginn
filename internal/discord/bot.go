@@ -22,41 +22,33 @@ type Bot struct {
 	kev            *cve.KEVClient
 	news           *news.Client
 	store          *store.Store
-	webhook        *WebhookSender
 	cmds           []*discordgo.ApplicationCommand
 	cveIntervalCh  chan time.Duration
 	newsIntervalCh chan time.Duration
 }
 
-func NewBot(cfg *config.Config, nvd *cve.NVDClient, kev *cve.KEVClient, st *store.Store, wh *WebhookSender) (*Bot, error) {
+func NewBot(cfg *config.Config, nvd *cve.NVDClient, kev *cve.KEVClient, st *store.Store) (*Bot, error) {
 	b := &Bot{
 		cfg:            cfg,
 		nvd:            nvd,
 		kev:            kev,
 		news:           news.NewClient(),
 		store:          st,
-		webhook:        wh,
 		cveIntervalCh:  make(chan time.Duration, 1),
 		newsIntervalCh: make(chan time.Duration, 1),
 	}
-	if cfg.DiscordBotToken != "" {
-		dg, err := discordgo.New("Bot " + cfg.DiscordBotToken)
-		if err != nil {
-			return nil, err
-		}
-		dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages
-		dg.AddHandler(b.onInteractionCreate)
-		dg.AddHandler(b.onGuildCreate)
-		b.session = dg
+	dg, err := discordgo.New("Bot " + cfg.DiscordBotToken)
+	if err != nil {
+		return nil, err
 	}
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages
+	dg.AddHandler(b.onInteractionCreate)
+	dg.AddHandler(b.onGuildCreate)
+	b.session = dg
 	return b, nil
 }
 
 func (b *Bot) Start(ctx context.Context) error {
-	if b.session == nil {
-		log.Printf("[DISCORD] Running in Webhook-Only Poller Mode (DISCORD_BOT_TOKEN not set; Slash Commands disabled)")
-		return nil
-	}
 	log.Printf("[DISCORD] Opening gateway WebSocket session...")
 	if err := b.session.Open(); err != nil {
 		return fmt.Errorf("open discord session: %w", err)
@@ -145,12 +137,6 @@ func (b *Bot) registerCommands(appID, guildID string) error {
 						MinValue:    &minLimit,
 						MaxValue:    10,
 					},
-					{
-						Type:        discordgo.ApplicationCommandOptionBoolean,
-						Name:        "push_webhook",
-						Description: "Also push the search results to the configured Discord Webhook",
-						Required:    false,
-					},
 				},
 			},
 			{
@@ -163,12 +149,6 @@ func (b *Bot) registerCommands(appID, guildID string) error {
 						Name:        "id",
 						Description: "CVE ID (e.g. CVE-2024-6387)",
 						Required:    true,
-					},
-					{
-						Type:        discordgo.ApplicationCommandOptionBoolean,
-						Name:        "push_webhook",
-						Description: "Also forward this CVE embed to the configured Discord Webhook",
-						Required:    false,
 					},
 				},
 			},
@@ -434,7 +414,6 @@ func (b *Bot) handleSearch(s *discordgo.Session, i *discordgo.InteractionCreate,
 
 	var keyword, severity string
 	limit := 3
-	pushWebhook := false
 
 	for _, o := range opts {
 		switch o.Name {
@@ -444,12 +423,10 @@ func (b *Bot) handleSearch(s *discordgo.Session, i *discordgo.InteractionCreate,
 			severity = o.StringValue()
 		case "limit":
 			limit = int(o.IntValue())
-		case "push_webhook":
-			pushWebhook = o.BoolValue()
 		}
 	}
 
-	log.Printf("[CMD] /cve search keyword=%q severity=%q limit=%d push_webhook=%v", keyword, severity, limit, pushWebhook)
+	log.Printf("[CMD] /cve search keyword=%q severity=%q limit=%d", keyword, severity, limit)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -480,14 +457,6 @@ func (b *Bot) handleSearch(s *discordgo.Session, i *discordgo.InteractionCreate,
 		header += fmt.Sprintf(" • Severity: **%s**", severity)
 	}
 
-	if pushWebhook && b.webhook.Enabled() {
-		if err := b.webhook.SendEmbeds(ctx, header, embeds); err != nil {
-			header += fmt.Sprintf("\n⚠️ _Webhook push failed: %v_", err)
-		} else {
-			header += "\n✅ _Forwarded to Webhook_"
-		}
-	}
-
 	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content: &header,
 		Embeds:  &embeds,
@@ -501,17 +470,13 @@ func (b *Bot) handleLookup(s *discordgo.Session, i *discordgo.InteractionCreate,
 	})
 
 	var cveID string
-	pushWebhook := false
 	for _, o := range opts {
-		switch o.Name {
-		case "id":
+		if o.Name == "id" {
 			cveID = strings.ToUpper(strings.TrimSpace(o.StringValue()))
-		case "push_webhook":
-			pushWebhook = o.BoolValue()
 		}
 	}
 
-	log.Printf("[CMD] /cve lookup id=%q push_webhook=%v", cveID, pushWebhook)
+	log.Printf("[CMD] /cve lookup id=%q", cveID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -533,13 +498,6 @@ func (b *Bot) handleLookup(s *discordgo.Session, i *discordgo.InteractionCreate,
 
 	embeds := []*discordgo.MessageEmbed{BuildCVEEmbed(items[0])}
 	content := ""
-	if pushWebhook && b.webhook.Enabled() {
-		if err := b.webhook.SendEmbeds(ctx, fmt.Sprintf("📌 **CVE Lookup Shared:** `%s`", cveID), embeds); err != nil {
-			content = fmt.Sprintf("⚠️ _Webhook push failed: %v_", err)
-		} else {
-			content = "✅ _Forwarded to Webhook_"
-		}
-	}
 
 	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content: &content,
@@ -649,10 +607,6 @@ func (b *Bot) handleWatch(s *discordgo.Session, i *discordgo.InteractionCreate, 
 		if len(sevs) > 0 {
 			sevDisplay = "`" + strings.Join(sevs, "`, `") + "`"
 		}
-		whStatus := "❌ Not set"
-		if b.webhook.Enabled() {
-			whStatus = "✅ Configured"
-		}
 		chStatus := "❌ Not set"
 		if chID := b.store.GetAlertChannel(""); chID != "" {
 			chStatus = fmt.Sprintf("<#%s>", chID)
@@ -662,10 +616,9 @@ func (b *Bot) handleWatch(s *discordgo.Session, i *discordgo.InteractionCreate, 
 			"📡 **Huginn CVE Auto-Tracker Configuration**\n"+
 				"• **Watched Severities:** %s\n"+
 				"• **CVE Poll Interval:** `%s`\n"+
-				"• **Webhook Output:** %s\n"+
 				"• **CVE Alert Channel:** %s\n"+
 				"• **Tracked CVEs in DB:** `%d`",
-			sevDisplay, curInterval, whStatus, chStatus, b.store.SeenCount(),
+			sevDisplay, curInterval, chStatus, b.store.SeenCount(),
 		)
 	}
 
@@ -921,15 +874,15 @@ func (b *Bot) RunPollCycle(ctx context.Context) (int, error) {
 		log.Printf("[CVE-POLL] Skipped: no severities watched (use /cve watch add)")
 		return 0, nil
 	}
-	if alertChannelID == "" && !b.webhook.Enabled() {
-		log.Printf("[CVE-POLL] Skipped: no alert channel or webhook bound yet (run /cve watch add in a Discord channel)")
+	if alertChannelID == "" {
+		log.Printf("[CVE-POLL] Skipped: no CVE alert channel bound yet (run /cve watch add in a Discord channel)")
 		return 0, nil
 	}
 
 	now := time.Now().UTC()
 	start := now.Add(-time.Duration(b.cfg.LookbackHours) * time.Hour)
-	log.Printf("[CVE-POLL] Starting cycle (window=%dh, watchedSeverities=%v, channel=%s, webhook=%v)",
-		b.cfg.LookbackHours, watchedSevs, emptyDefault(alertChannelID, "none"), b.webhook.Enabled())
+	log.Printf("[CVE-POLL] Starting cycle (window=%dh, watchedSeverities=%v, channel=%s)",
+		b.cfg.LookbackHours, watchedSevs, alertChannelID)
 
 	items, total, err := b.nvd.Search(ctx, cve.SearchOptions{
 		PubStartDate: &start,
@@ -973,14 +926,6 @@ func (b *Bot) RunPollCycle(ctx context.Context) (int, error) {
 	header := fmt.Sprintf("🚨 **New CVE Security Alert** (%d new • Watched Severities: `%s`)", len(matched), strings.Join(watchedSevs, ", "))
 	dispatched := false
 
-	if b.webhook != nil && b.webhook.Enabled() {
-		log.Printf("[CVE-POLL] Pushing %d CVE embed(s) to Discord Webhook...", len(embeds))
-		if err := b.webhook.SendEmbeds(ctx, header, embeds); err != nil {
-			return 0, fmt.Errorf("webhook dispatch: %w", err)
-		}
-		dispatched = true
-	}
-
 	if b.session != nil && alertChannelID != "" {
 		for idx, emb := range embeds {
 			m := matched[idx]
@@ -1017,12 +962,12 @@ func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
 		log.Printf("[NEWS-POLL] Skipped: no news categories watched (run /news watch add in a Discord channel)")
 		return 0, nil
 	}
-	if newsChannelID == "" && !b.webhook.Enabled() {
+	if newsChannelID == "" {
 		log.Printf("[NEWS-POLL] Skipped: no news alert channel bound yet (run /news watch add in a Discord channel)")
 		return 0, nil
 	}
 
-	log.Printf("[NEWS-POLL] Starting cycle (categories=%v, channel=%s)", cats, emptyDefault(newsChannelID, "webhook"))
+	log.Printf("[NEWS-POLL] Starting cycle (categories=%v, channel=%s)", cats, newsChannelID)
 
 	_ = b.kev.EnsureLoaded(ctx)
 	articles, err := b.news.Fetch(ctx, cats, "", 40)
@@ -1082,12 +1027,6 @@ func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
 				dispatched = true
 			}
 		}
-	} else if b.webhook != nil && b.webhook.Enabled() {
-		log.Printf("[NEWS-POLL] Pushing %d article embed(s) to Discord Webhook...", len(embeds))
-		if err := b.webhook.SendEmbeds(ctx, header, embeds); err != nil {
-			return 0, fmt.Errorf("news webhook dispatch: %w", err)
-		}
-		dispatched = true
 	}
 
 	if dispatched {
