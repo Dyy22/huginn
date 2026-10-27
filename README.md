@@ -1,75 +1,149 @@
-# 🛡️ CVE Threat Radar — Go Discord Bot & Webhook Tracker
+<div align="center">
 
-Bot Discord berbasis **Go (`discordgo`)** yang terintegrasi dengan **NVD NIST API v2.0** dan **CISA KEV (Known Exploited Vulnerabilities)** untuk:
-1. **Rich Embed Webhook & Channel Auto-Alerts** — Polling berkala CVE terbaru dengan filter minimum severity (`CRITICAL`/`HIGH`/`MEDIUM`/`LOW`), dynamic keyword/vendor watchlist, dan deduplikasi SQLite (`modernc.org/sqlite`, pure Go tanpa CGO).
-2. **Enrichment CISA KEV Otomatis** — Setiap CVE yang dicari atau di-poll otomatis dicek ke katalog CISA KEV. Jika sedang dieksploitasi aktif di lapangan (*in the wild*), embed berubah menjadi neon-crimson dengan badge peringatan khusus, info *Patch Due Date*, dan status pemakaian *Ransomware*.
-3. **Slash Commands (`/cve`)** — Cari CVE berdasarkan keyword, lookup CVE ID spesifik, cek daftar CISA KEV terbaru, dan kelola watchlist langsung dari Discord.
+# 🐦‍⬛ Huginn
 
----
+**Tactical CVE, CISA KEV & Cybersecurity Threat Intelligence Discord Bot**
 
-## 📂 Struktur Project
+[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat-square&logo=go)](https://go.dev/)
+[![Docker](https://img.shields.io/badge/Docker-Alpine%20%7C%20~21MB-2496ED?style=flat-square&logo=docker&logoColor=white)](./Dockerfile)
+[![NIST NVD](https://img.shields.io/badge/Feed-NIST%20NVD%20v2.0-003366?style=flat-square)](https://nvd.nist.gov/developers/vulnerabilities)
+[![CISA KEV](https://img.shields.io/badge/Exploit%20Intel-CISA%20KEV-FF0055?style=flat-square)](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)
+[![License: MIT](https://img.shields.io/badge/License-MIT-2ECC71?style=flat-square)](./LICENSE)
 
-```text
-/home/perdy/Documents/discord-bot
-├── cmd/cvebot/main.go          # Entry point (Daemon Bot + One-shot CLI tester)
-├── internal/
-│   ├── config/config.go        # Konfigurasi via .env
-│   ├── cve/
-│   │   ├── types.go            # Normalized CVEItem & KEVEntry structs
-│   │   ├── nvd.go              # Client NVD API v2.0 (tail-pagination + rate-limiter)
-│   │   └── kev.go              # Client & in-memory cache CISA KEV catalog
-│   ├── discord/
-│   │   ├── bot.go              # Slash command handler & background poller
-│   │   ├── embeds.go           # Builder Discord Rich Embed (color-coded + CVSS bar)
-│   │   └── webhook.go          # Webhook sender (batching 10 embeds/msg)
-│   └── store/sqlite.go         # SQLite store (seen_cves, watchlist, settings)
-├── .env.example                # Template environment variable
-└── cvebot                      # Compiled binary
-```
+*Named after Odin's raven who flies across Midgard to gather intelligence — **Huginn** continuously monitors the **NIST NVD v2.0 API**, the **CISA Known Exploited Vulnerabilities (KEV)** catalog, and **8+ top cybersecurity research feeds**, delivering rich, actionable threat intelligence cards directly to your Discord channels.*
+
+</div>
 
 ---
 
-## 🚀 Cara Pakai Cepat
+## ✨ Key Features
 
-### 1. Setup `.env`
+### 🛡️ 1. Real-Time CVE & CISA KEV Radar (`/cve`)
+- **Automated NVD v2.0 Polling & Tail-Pagination:** Queries NIST NVD v2.0 with automatic tail-page fetching so keyword searches and background polls always return the **newest** vulnerabilities rather than legacy records.
+- **Automatic CISA KEV Cross-Enrichment:** Every CVE is cross-referenced against the in-memory **CISA Known Exploited Vulnerabilities** catalog. Actively exploited CVEs are highlighted in neon-crimson (`#FF0055`) with patch due dates, ransomware campaign indicators, and mandated remediation actions.
+- **Tactical Rich Embeds:**
+  - **3-Column Inline Grid:** CVSS v3.1/v4.0 score bar (`████████░░`), affected vendor/product/version range (`cve.affected` + CPE 2.3), and human-readable CWE classification (e.g., `CWE-89` → *SQL Injection (SQLi)*).
+  - **Exploitability Badges:** Translates raw CVSS vectors into instant visual badges (`🌐 Network` • `⚡ Low Complexity` • `🔓 No Auth Required` • `🎯 Zero-Click` • `💥 Scope Changed`).
+  - **Threat Hunting Pivot Links:** Direct one-click links to NVD Detail, CVE.org, and GitHub PoC repository search.
+
+### 📰 2. Curated Cybersecurity News, Research & Writeups (`/news`)
+- **Multi-Source Concurrent RSS/Atom Engine:** Aggregates articles across three curated categories:
+  - 🔥 **`breaking`** — *The Hacker News*, *BleepingComputer*, *Dark Reading*
+  - 🔬 **`research`** — *Google Project Zero*, *PortSwigger Research*, *watchTowr Labs*, *Zero Day Initiative (ZDI)*
+  - 🎯 **`writeups`** — *Intigriti Bug Bytes*
+- **Auto-CVE Extraction & KEV Tagging:** Automatically scans article headlines and summaries for `CVE-YYYY-NNNN` identifiers, attaches clickable NVD badges to the news embed, and flags any CVE present in the **CISA KEV** catalog.
+
+### ⚙️ 3. Zero-Config Channel Binding & Live-Reload Intervals
+- **Context-Aware Channel Binding:** Run `/cve watch add` in `#cve-alerts` and `/news watch add` in `#cyber-news` — Huginn automatically binds each feed to the channel where the command was executed.
+- **Independent Live-Reload Tickers:** Adjust CVE and News polling intervals independently on the fly (`/cve watch interval` and `/news watch interval`) without restarting the container.
+- **Pure-Go SQLite Deduplication (`CGO_ENABLED=0`):** Uses `modernc.org/sqlite` to persist seen CVEs, seen articles, watched severities/categories, and polling intervals inside a lightweight ~21 MB static Alpine container.
+
+---
+
+## 💬 Slash Commands Reference
+
+### `/cve` — Vulnerability & Exploit Intelligence
+
+| Command | Description |
+| :--- | :--- |
+| `/cve search keyword:<text> [severity] [limit]` | Search newest CVEs by vendor, product, or vulnerability keyword with optional CVSS severity filter (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`). |
+| `/cve lookup id:<CVE-YYYY-NNNN>` | Inspect full tactical Rich Embed for a specific CVE ID (e.g., `CVE-2024-6387`). |
+| `/cve kev [keyword] [limit]` | Browse the latest actively exploited vulnerabilities from the **CISA KEV** catalog. |
+| `/cve watch add severity:<level>` | Subscribe the current channel to auto-alerts for a severity level (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`). |
+| `/cve watch remove severity:<level>` | Remove a severity level from the auto-tracker watchlist. |
+| `/cve watch interval duration:<time>` | Dynamically update the CVE polling interval (e.g., `5m`, `15m`, `30m`, `1h`). |
+| `/cve watch list` | Display watched severities, bound alert channel, polling interval, and total tracked CVEs. |
+| `/cve poll-now` | Trigger an immediate NVD + CISA KEV poll cycle. |
+
+### `/news` — Cybersecurity News & Writeup Radar
+
+| Command | Description |
+| :--- | :--- |
+| `/news latest [category] [limit]` | Fetch the newest articles from `all`, `breaking`, `research`, or `writeups`. |
+| `/news search keyword:<text> [limit]` | Search across all cybersecurity RSS feeds by keyword, vendor, or CVE ID. |
+| `/news watch add [category]` | Bind the current channel to receive automated news alerts (`all`, `breaking`, `research`, or `writeups`). |
+| `/news watch remove [category]` | Unsubscribe a news category from automated alerts. |
+| `/news watch interval duration:<time>` | Dynamically update the News polling interval (e.g., `15m`, `30m`, `1h`). |
+| `/news watch list` | Display watched news categories, bound channel, polling interval, and tracked article count. |
+| `/news poll-now` | Trigger an immediate RSS feed poll cycle. |
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+1. Create a Discord Application & Bot at the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Enable **`applications.commands`** and **`bot`** scopes under **Installation** (with `Send Messages`, `Embed Links`, and `Use Slash Commands` permissions) and invite the bot to your server.
+3. *(Optional)* Request a free [NIST NVD API Key](https://nvd.nist.gov/developers/request-an-api-key) to increase the NVD rate limit from 5 requests/30s to 50 requests/30s.
+
+### Option A: Docker Compose (Recommended)
+
 ```bash
+git clone https://github.com/Dyy22/huginn.git
+cd huginn
 cp .env.example .env
 ```
-Isi variabel berikut di `.env`:
-- `DISCORD_BOT_TOKEN` & `DISCORD_APP_ID` (dari [Discord Developer Portal](https://discord.com/developers/applications))
-- `DISCORD_GUILD_ID` (opsional tapi disarankan supaya Slash Command `/cve` langsung muncul instan di server tanpa nunggu propagasi global 1 jam)
-- `DISCORD_WEBHOOK_URL` (URL webhook channel Discord untuk pengiriman Rich Embed)
-- `NVD_API_KEY` (opsional, menaikkan rate limit NVD dari 5 req/30s menjadi 50 req/30s)
 
-### 2. Test Langsung dari Terminal (Mode CLI / Tanpa Bot Token)
-Kamu bisa langsung ngetes pencarian CVE dan kirim ke Webhook tanpa nyalain daemon bot:
-```bash
-# Lookup 1 CVE spesifik (termasuk cek status CISA KEV)
-./cvebot -cve CVE-2021-44228
-
-# Search CVE berdasarkan keyword + filter severity
-./cvebot -search fortinet -severity CRITICAL -limit 3
-
-# Search sekaligus tembak Rich Embed ke DISCORD_WEBHOOK_URL di .env
-./cvebot -search openssh -severity HIGH -limit 2 -send-webhook
+Edit `.env` and set your credentials:
+```env
+DISCORD_BOT_TOKEN=your_discord_bot_token_here
+DISCORD_APP_ID=your_discord_application_id_here
+NVD_API_KEY=your_optional_nvd_api_key
+DB_PATH=/data/cve_tracker.db
 ```
 
-### 3. Jalankan Bot Daemon (Slash Commands + Background Poller)
+Launch the container:
 ```bash
+docker compose up -d --build
+docker compose logs -f
+```
+
+### Option B: Build from Source (Go 1.23+)
+
+```bash
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o cvebot ./cmd/cvebot
 ./cvebot
 ```
 
+#### One-Shot CLI Mode (Testing without Discord Bot Daemon)
+You can also query NVD + CISA KEV directly from your terminal:
+```bash
+# Lookup a specific CVE ID
+./cvebot -cve CVE-2021-44228
+
+# Search newest CVEs by keyword and severity
+./cvebot -search fortinet -severity CRITICAL -limit 3
+```
+
 ---
 
-## 💬 Daftar Slash Commands di Discord
+## 📂 Project Architecture
 
-| Command | Fungsi |
-| :--- | :--- |
-| `/cve search keyword:<text> [severity] [limit] [push_webhook]` | Cari CVE terbaru berdasarkan keyword/vendor/produk, urut dari yang paling baru, dengan opsi langsung forward ke Webhook. |
-| `/cve lookup id:<CVE-YYYY-NNNN> [push_webhook]` | Tampilkan detail lengkap Rich Embed untuk 1 CVE ID spesifik. |
-| `/cve kev [keyword] [limit]` | Tampilkan daftar kerentanan terbaru yang sedang aktif dieksploitasi menurut katalog **CISA KEV**. |
-| `/cve watch add keyword:<text>` | Tambah keyword/vendor ke watchlist otomatis (disimpan di SQLite). |
-| `/cve watch remove keyword:<text>` | Hapus keyword dari watchlist. |
-| `/cve watch severity level:<CRITICAL\|HIGH\|MEDIUM\|LOW>` | Ubah batas minimum severity untuk auto-alert. |
-| `/cve watch list` | Lihat status konfigurasi tracker, daftar keyword aktif, dan jumlah CVE yang sudah tercatat di database. |
-| `/cve poll-now` | Paksa bot melakukan polling NVD + CISA KEV saat itu juga dan kirim temuan baru ke Webhook/Channel. |
+```text
+huginn/
+├── cmd/cvebot/
+│   └── main.go                 # Entrypoint, independent CVE & News poller goroutines, CLI mode
+├── internal/
+│   ├── config/
+│   │   └── config.go           # Environment configuration loader
+│   ├── cve/
+│   │   ├── types.go            # Normalized CVEItem & KEVEntry models
+│   │   ├── nvd.go              # NIST NVD API v2.0 client (rate-limiting + tail pagination)
+│   │   └── kev.go              # CISA KEV catalog client & thread-safe in-memory cache
+│   ├── news/
+│   │   └── feeds.go            # Concurrent RSS 2.0 / Atom parser & CVE regex extractor
+│   ├── discord/
+│   │   ├── bot.go              # Discord gateway handlers (/cve & /news) + pollers
+│   │   └── embeds.go           # Rich Embed builders, CWE mapper & CVSS vector humanizer
+│   └── store/
+│       └── sqlite.go           # Pure-Go SQLite persistence & deduplication store
+├── Dockerfile                  # Multi-stage static Alpine build (~21MB image)
+├── docker-compose.yml          # Production Compose definition with named volume persistence
+└── .env.example                # Environment template
+```
+
+---
+
+## 📄 License
+
+Released under the [MIT License](./LICENSE).
