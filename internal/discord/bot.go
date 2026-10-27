@@ -975,7 +975,6 @@ func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	isFirstSeed := b.store.SeenNewsCount() == 0
 	var (
 		unseen      []news.Article
 		skippedSeen int
@@ -995,14 +994,15 @@ func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
+	// Drip-feed batching: send up to 5 newest unseen articles per cycle and only mark those 5 as seen.
+	// Remaining unseen articles stay queued for subsequent ticker cycles.
+	const maxBatch = 5
 	toSend := unseen
-	var backlog []news.Article
-	if isFirstSeed && len(unseen) > 5 {
-		toSend = unseen[:5]
-		backlog = unseen[5:]
-		log.Printf("[NEWS-POLL] Initial seed detected: sending 5 newest articles and marking %d older backlog articles as seen", len(backlog))
-	} else if len(unseen) > 10 {
-		toSend = unseen[:10]
+	remaining := 0
+	if len(unseen) > maxBatch {
+		toSend = unseen[:maxBatch]
+		remaining = len(unseen) - maxBatch
+		log.Printf("[NEWS-POLL] Batching: dispatching %d newest unseen articles now (%d remaining queued for next cycles)", len(toSend), remaining)
 	}
 
 	embeds := make([]*discordgo.MessageEmbed, 0, len(toSend))
@@ -1011,7 +1011,7 @@ func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
 	}
 
 	header := fmt.Sprintf("📰 **New Cybersecurity Intel** (%d new article(s) • Categories: `%s`)", len(embeds), strings.Join(cats, ", "))
-	dispatched := false
+	sentCount := 0
 
 	if b.session != nil && newsChannelID != "" {
 		for idx, emb := range embeds {
@@ -1024,23 +1024,15 @@ func (b *Bot) RunNewsPollCycle(ctx context.Context) (int, error) {
 			if _, err := b.session.ChannelMessageSendComplex(newsChannelID, msg); err != nil {
 				log.Printf("[NEWS-POLL] WARN: Failed sending article to channel %s: %v", newsChannelID, err)
 			} else {
-				dispatched = true
+				_ = b.store.MarkNewsSeen(art.URL, art.Source)
+				sentCount++
 			}
 		}
 	}
 
-	if dispatched {
-		for _, art := range toSend {
-			_ = b.store.MarkNewsSeen(art.URL, art.Source)
-		}
-		for _, art := range backlog {
-			_ = b.store.MarkNewsSeen(art.URL, art.Source)
-		}
-	}
-
-	log.Printf("[NEWS-POLL] Cycle finished in %s: dispatched %d new article(s) (totalSeenNewsInDB=%d)",
-		time.Since(cycleStart).Round(time.Millisecond), len(toSend), b.store.SeenNewsCount())
-	return len(toSend), nil
+	log.Printf("[NEWS-POLL] Cycle finished in %s: dispatched %d article(s), %d still unseen in queue (totalSeenNewsInDB=%d)",
+		time.Since(cycleStart).Round(time.Millisecond), sentCount, remaining, b.store.SeenNewsCount())
+	return sentCount, nil
 }
 
 func pushDuration(ch chan time.Duration, d time.Duration) {
