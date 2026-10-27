@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/xml"
 	"html"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -36,7 +35,7 @@ var DefaultFeeds = []FeedSource{
 	{Name: "BleepingComputer", Category: "breaking", URL: "https://www.bleepingcomputer.com/feed/"},
 	{Name: "Dark Reading", Category: "breaking", URL: "https://www.darkreading.com/rss.xml"},
 	{Name: "PortSwigger Research", Category: "research", URL: "https://portswigger.net/research/rss"},
-	{Name: "Google Project Zero", Category: "research", URL: "https://googleprojectzero.blogspot.com/feeds/posts/default?alt=rss"},
+	{Name: "Google Project Zero", Category: "research", URL: "https://googleprojectzero.blogspot.com/feeds/posts/default?alt=rss&max-results=10"},
 	{Name: "watchTowr Labs", Category: "research", URL: "https://labs.watchtowr.com/rss/"},
 	{Name: "Intigriti Bug Bytes", Category: "writeups", URL: "https://blog.intigriti.com/feed/"},
 	{Name: "Zero Day Initiative", Category: "research", URL: "https://www.zerodayinitiative.com/blog?format=rss"},
@@ -198,13 +197,10 @@ func (c *Client) fetchSingleFeed(ctx context.Context, src FeedSource) ([]Article
 		return nil, nil
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
-	if err != nil {
-		return nil, err
-	}
-
 	var root rssRoot
-	if err := xml.Unmarshal(body, &root); err != nil {
+	dec := xml.NewDecoder(resp.Body)
+	dec.Strict = false
+	if err := dec.Decode(&root); err != nil {
 		return nil, err
 	}
 
